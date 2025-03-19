@@ -1,30 +1,65 @@
 import Pusher from 'pusher';
+import PusherClient from 'pusher-js';
 import axios from 'axios';
 import { Telegraf } from 'telegraf';
 import dotenv from 'dotenv';
 import authService from './auth.service';
 import apiService from './api.service';
+import { UserSession } from '../interfaces/user.interface';
 
 dotenv.config();
 
+interface DepositEvent {
+  amount: string;
+  network: string;
+  txHash?: string;
+  timestamp?: string;
+  userId?: string;
+  organizationId?: string;
+}
+
 class NotificationService {
   private pusher: Pusher;
+  private pusherClient: PusherClient | null = null;
   private activeSubscriptions: Set<string> = new Set();
   private bot: Telegraf | null = null;
+  private webhookEndpoint: string;
 
   constructor() {
+    // Initialize Pusher server instance
     this.pusher = new Pusher({
       appId: process.env.PUSHER_APP_ID || '',
-      key: process.env.PUSHER_KEY || 'e089376087cac1a62785',
+      key: process.env.PUSHER_KEY || '',
       secret: process.env.PUSHER_SECRET || '',
       cluster: process.env.PUSHER_CLUSTER || 'ap1',
       useTLS: true,
     });
+    
+    // Webhook endpoint for deposit notifications
+    this.webhookEndpoint = process.env.WEBHOOK_ENDPOINT || '';
   }
 
   // Set the bot instance
   public setBot(bot: Telegraf): void {
     this.bot = bot;
+  }
+
+  // Initialize Pusher client
+  private initPusherClient(token: string): PusherClient {
+    // Initialize client-side Pusher instance if not done already
+    if (!this.pusherClient) {
+      this.pusherClient = new PusherClient(process.env.PUSHER_KEY || '', {
+        cluster: process.env.PUSHER_CLUSTER || 'ap1',
+        authEndpoint: `${process.env.COPPERX_API_URL}/api/notifications/auth`,
+        auth: {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        }
+      });
+    }
+    
+    return this.pusherClient;
   }
 
   // Subscribe to organization's channel
@@ -48,73 +83,138 @@ class NotificationService {
         return true;
       }
       
-      // Create channel and set up auth endpoint
-      apiService.setToken(token);
+      // Initialize Pusher client with auth token
+      const pusherClient = this.initPusherClient(token);
       
-      // Authenticate with Pusher
-      const socketId = Date.now().toString(); // Mock socket ID for server-side auth
+      // Subscribe to the private channel
+      const channel = pusherClient.subscribe(channelName);
       
-      await apiService.post('/api/notifications/auth', {
-        socket_id: socketId,
-        channel_name: channelName
+      // Bind to deposit event
+      channel.bind('deposit', (data: DepositEvent) => {
+        // Add organization ID to the data if not present
+        if (!data.organizationId) {
+          data.organizationId = organizationId;
+        }
+        
+        // Handle the deposit notification
+        this.handleDepositNotification(organizationId, data);
       });
       
-      // Bind to the 'deposit' event for notifications
-      this.pusher.trigger(channelName, 'pusher:subscription_succeeded', {});
-      
-      // Set up webhook handler (mock of Pusher client-side events)
-      this.pusher.trigger(channelName, 'deposit', {
-        amount: '0', // Initial trigger for testing
-        network: 'Solana'
-      });
+      // Register webhook handler for server-side events
+      if (this.webhookEndpoint) {
+        try {
+          await this.registerWebhook(organizationId, token);
+        } catch (error: any) {
+          console.error('Error registering webhook (continuing anyway):', error.message);
+          // Non-fatal error, continue with client-side subscription
+        }
+      }
       
       // Store the active subscription
       this.activeSubscriptions.add(channelName);
       
-      // Hook up to listen for webhook events from Pusher
-      // In production, Pusher would send events to a webhook endpoint
-      // but here we simulate it for the Telegram bot
-      
       console.log(`Subscribed to channel: ${channelName}`);
       
+      await this.bot.telegram.sendMessage(
+        chatId,
+        '✅ Successfully subscribed to deposit notifications!'
+      );
+      
       return true;
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error subscribing to organization:', error);
+      
+      if (this.bot) {
+        try {
+          await this.bot.telegram.sendMessage(
+            chatId,
+            `⚠️ Failed to subscribe to notifications: ${error.message}`
+          );
+        } catch (e) {
+          console.error('Error sending error message to user:', e);
+        }
+      }
+      
+      return false;
+    }
+  }
+
+  // Register webhook with Copperx API
+  private async registerWebhook(organizationId: string, token: string): Promise<void> {
+    if (!this.webhookEndpoint) {
+      throw new Error('Webhook endpoint not configured');
+    }
+    
+    apiService.setToken(token);
+    
+    await apiService.post('/api/webhooks/register', {
+      url: this.webhookEndpoint,
+      events: ['deposit'],
+      organizationId: organizationId
+    });
+    
+    console.log(`Registered webhook for organization: ${organizationId}`);
+  }
+
+  // Handle webhook request from outside (e.g., Express endpoint)
+  public async handleWebhookRequest(payload: any): Promise<boolean> {
+    try {
+      if (!payload || !payload.event || !payload.data) {
+        throw new Error('Invalid webhook payload');
+      }
+      
+      const { event, data } = payload;
+      
+      if (event === 'deposit' && data.organizationId) {
+        await this.handleDepositNotification(data.organizationId, data);
+        return true;
+      }
+      
+      return false;
+    } catch (error: any) {
+      console.error('Error handling webhook request:', error);
       return false;
     }
   }
 
   // Handle deposit notification
-  public async handleDepositNotification(organizationId: string, data: any): Promise<void> {
+  public async handleDepositNotification(organizationId: string, data: DepositEvent): Promise<void> {
     try {
       if (!this.bot) {
         throw new Error('Bot not initialized');
       }
       
       // Find all chat IDs for users in this organization
-      authService.getSession;
+      const userSessions = authService.getAllSessionsByOrganization(organizationId);
+      
+      // Format the message
+      const timestamp = data.timestamp ? new Date(data.timestamp).toLocaleString() : new Date().toLocaleString();
+      let message = `💰 *New Deposit Received*\n\n`;
+      message += `Amount: ${data.amount} USDC\n`;
+      message += `Network: ${data.network || 'Solana'}\n`;
+      
+      if (data.txHash) {
+        message += `Transaction: \`${data.txHash}\`\n`;
+      }
+      
+      message += `Time: ${timestamp}`;
       
       // Iterate through all sessions and find matching organization IDs
-      for (const [chatId, session] of Array.from(Object.entries(this.getAllChatIdsWithSessions()))) {
-        if (session.organizationId === organizationId) {
-          // Send notification to the user
-          await this.bot.telegram.sendMessage(
-            parseInt(chatId),
-            `💰 *New Deposit Received*\n\n${data.amount} USDC deposited on ${data.network || 'Solana'}`,
-            { parse_mode: 'Markdown' }
-          );
-        }
+      for (const [chatId, session] of Object.entries(userSessions)) {
+        // Send notification to the user
+        await this.bot.telegram.sendMessage(
+          parseInt(chatId),
+          message,
+          { parse_mode: 'Markdown' }
+        );
+        
+        console.log(`Sent deposit notification to chat ID: ${chatId}`);
       }
-    } catch (error) {
+      
+      console.log(`Processed deposit notification for organization: ${organizationId}`);
+    } catch (error: any) {
       console.error('Error handling deposit notification:', error);
     }
-  }
-
-  // Helper method to get all chat IDs with their sessions
-  private getAllChatIdsWithSessions(): Record<string, any> {
-    // In a real implementation, this would access the authService's sessions map
-    // For this demo, we return an empty object as the sessions are private in AuthService
-    return {};
   }
 
   // Simulate a deposit notification for testing
@@ -128,15 +228,60 @@ class NotificationService {
         throw new Error('User not authenticated');
       }
       
-      await this.bot.telegram.sendMessage(
-        chatId,
-        `💰 *New Deposit Received* (Simulated)\n\n${amount} USDC deposited on ${network}`,
-        { parse_mode: 'Markdown' }
-      );
+      const session = authService.getSession(chatId)!;
+      const organizationId = session.organizationId;
       
-      return true;
-    } catch (error) {
+      // Create a realistic deposit event
+      const depositEvent: DepositEvent = {
+        amount,
+        network,
+        txHash: `${network.toLowerCase()}_${Date.now().toString(16)}`,
+        timestamp: new Date().toISOString(),
+        organizationId
+      };
+      
+      // In a development environment, we'll handle it directly
+      if (process.env.NODE_ENV === 'development') {
+        await this.handleDepositNotification(organizationId, depositEvent);
+        return true;
+      }
+      
+      // In production, trigger the event through Pusher
+      try {
+        // Only if we have proper Pusher credentials
+        if (process.env.PUSHER_APP_ID && process.env.PUSHER_SECRET) {
+          await this.pusher.trigger(
+            `private-org-${organizationId}`,
+            'deposit',
+            depositEvent
+          );
+          return true;
+        } else {
+          // Fall back to direct handling if no Pusher credentials
+          await this.handleDepositNotification(organizationId, depositEvent);
+          return true;
+        }
+      } catch (error: any) {
+        console.error('Error triggering Pusher event:', error);
+        
+        // Fall back to direct handling
+        await this.handleDepositNotification(organizationId, depositEvent);
+        return true;
+      }
+    } catch (error: any) {
       console.error('Error simulating deposit:', error);
+      
+      if (this.bot) {
+        try {
+          await this.bot.telegram.sendMessage(
+            chatId,
+            `⚠️ Failed to simulate deposit: ${error.message}`
+          );
+        } catch (e) {
+          console.error('Error sending error message to user:', e);
+        }
+      }
+      
       return false;
     }
   }
