@@ -1,16 +1,30 @@
-import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from 'axios';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
+// API Error class for structured error handling
+class ApiError extends Error {
+  status: number;
+  data: any;
+
+  constructor(message: string, status: number = 500, data: any = null) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.data = data;
+  }
+}
+
 class ApiService {
   private api: AxiosInstance;
   private token: string | null = null;
+  private maxRetries: number = 3;
 
   constructor() {
     this.api = axios.create({
       baseURL: process.env.COPPERX_API_URL || 'https://income-api.copperx.io',
-      timeout: 10000,
+      timeout: 15000, // Increased timeout for more reliable connections
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
@@ -24,6 +38,64 @@ class ApiService {
       }
       return config;
     });
+    
+    // Add a response interceptor for error handling
+    this.api.interceptors.response.use(
+      response => response,
+      async (error: AxiosError) => {
+        const config = error.config;
+        
+        if (!config) {
+          return Promise.reject(error);
+        }
+        
+        // @ts-ignore - Add retries count to config
+        config.__retryCount = config.__retryCount || 0;
+        
+        // Check if we should retry the request
+        if (this.shouldRetry(error)) {
+          // @ts-ignore - Increment retry count
+          config.__retryCount += 1;
+          
+          // Check if we've reached max retries
+          // @ts-ignore
+          if (config.__retryCount <= this.maxRetries) {
+            // Exponential backoff
+            // @ts-ignore
+            const backoff = Math.pow(2, config.__retryCount) * 1000;
+            
+            // Wait for backoff time
+            await new Promise(resolve => setTimeout(resolve, backoff));
+            
+            // Retry the request
+            return this.api(config);
+          }
+        }
+        
+        // If we shouldn't retry or max retries reached
+        return Promise.reject(error);
+      }
+    );
+  }
+
+  private shouldRetry(error: AxiosError): boolean {
+    // Retry network errors, timeouts, and certain HTTP status codes
+    if (!error.response) {
+      // Network error or timeout
+      return true;
+    }
+    
+    // Don't retry client errors (4xx) except for 429 (too many requests)
+    if (error.response.status === 429) {
+      return true;
+    }
+    
+    // Retry on server errors (5xx)
+    if (error.response.status >= 500 && error.response.status < 600) {
+      return true;
+    }
+    
+    return false;
   }
 
   public setToken(token: string): void {
@@ -40,7 +112,7 @@ class ApiService {
       return response.data;
     } catch (error: any) {
       this.handleError(error);
-      throw error;
+      throw this.formatError(error);
     }
   }
 
@@ -50,7 +122,7 @@ class ApiService {
       return response.data;
     } catch (error: any) {
       this.handleError(error);
-      throw error;
+      throw this.formatError(error);
     }
   }
 
@@ -60,7 +132,7 @@ class ApiService {
       return response.data;
     } catch (error: any) {
       this.handleError(error);
-      throw error;
+      throw this.formatError(error);
     }
   }
 
@@ -70,7 +142,7 @@ class ApiService {
       return response.data;
     } catch (error: any) {
       this.handleError(error);
-      throw error;
+      throw this.formatError(error);
     }
   }
 
@@ -86,6 +158,41 @@ class ApiService {
     } else {
       // Something happened in setting up the request that triggered an Error
       console.error('API Error Message:', error.message);
+    }
+  }
+  
+  private formatError(error: any): ApiError {
+    if (error.response) {
+      const { data, status } = error.response;
+      
+      // Format the error message based on the API response
+      let message = 'An error occurred';
+      
+      if (data && data.message) {
+        message = data.message;
+      } else if (data && data.error) {
+        message = data.error;
+      } else if (typeof data === 'string') {
+        message = data;
+      }
+      
+      return new ApiError(message, status, data);
+    } else if (error.request) {
+      // Network error
+      return new ApiError('Network error. Please check your connection.', 0);
+    } else {
+      // Unknown error
+      return new ApiError(error.message || 'Unknown error occurred', 500);
+    }
+  }
+  
+  // Check if the API is reachable
+  public async isReachable(): Promise<boolean> {
+    try {
+      await this.api.get('/health');
+      return true;
+    } catch (error) {
+      return false;
     }
   }
 }
