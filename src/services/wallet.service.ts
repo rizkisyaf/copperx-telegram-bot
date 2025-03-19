@@ -1,65 +1,20 @@
 import apiService from './api.service';
 import authService from './auth.service';
+import feeService from './fee.service';
 import { ApiResponse } from '../interfaces/api.interface';
 import { WalletBalanceResponse, WalletResponse, TransferResponse, TransfersListResponse, BankAccountResponse } from '../interfaces/api.interface';
 import { TransferRequest } from '../interfaces/wallet.interface';
 
-// Fee structure (these would be fetched from the API in a real implementation)
-const FEES = {
-  EMAIL_TRANSFER: 0.1, // $0.10 fee for email transfers
-  WALLET_TRANSFER: {
-    SOLANA: 0.2,       // $0.20 fee for Solana transfers
-    ETHEREUM: 1.5      // $1.50 fee for Ethereum transfers (higher gas fees)
-  },
-  BANK_TRANSFER: 5.0   // $5.00 fee for bank transfers
-};
-
-// Minimum amounts (these would be fetched from the API in a real implementation)
-const MIN_AMOUNTS = {
-  EMAIL_TRANSFER: 1.0,  // $1 minimum for email transfers
-  WALLET_TRANSFER: {
-    SOLANA: 5.0,        // $5 minimum for Solana transfers
-    ETHEREUM: 20.0      // $20 minimum for Ethereum transfers
-  },
-  BANK_TRANSFER: 50.0   // $50 minimum for bank transfers
-};
-
 class WalletService {
   // Calculate fee for a transaction
-  public calculateFee(amount: string, transferType: 'email' | 'wallet' | 'bank', network?: string): number {
-    const amountNum = parseFloat(amount);
-    
-    if (transferType === 'email') {
-      return FEES.EMAIL_TRANSFER;
-    } else if (transferType === 'wallet' && network) {
-      return FEES.WALLET_TRANSFER[network.toUpperCase() as keyof typeof FEES.WALLET_TRANSFER] || FEES.WALLET_TRANSFER.SOLANA;
-    } else if (transferType === 'bank') {
-      return FEES.BANK_TRANSFER;
-    }
-    
-    return 0;
+  public async calculateFee(amount: string, transferType: 'email' | 'wallet' | 'bank', network?: string, chatId?: number): Promise<number> {
+    const feeCalculation = await feeService.calculateFee(amount, transferType, network, chatId);
+    return feeCalculation.fee;
   }
   
   // Check if amount meets minimum requirements
-  public validateMinimumAmount(amount: string, transferType: 'email' | 'wallet' | 'bank', network?: string): { valid: boolean, minimumAmount?: number } {
-    const amountNum = parseFloat(amount);
-    
-    if (transferType === 'email') {
-      if (amountNum < MIN_AMOUNTS.EMAIL_TRANSFER) {
-        return { valid: false, minimumAmount: MIN_AMOUNTS.EMAIL_TRANSFER };
-      }
-    } else if (transferType === 'wallet' && network) {
-      const minAmount = MIN_AMOUNTS.WALLET_TRANSFER[network.toUpperCase() as keyof typeof MIN_AMOUNTS.WALLET_TRANSFER] || MIN_AMOUNTS.WALLET_TRANSFER.SOLANA;
-      if (amountNum < minAmount) {
-        return { valid: false, minimumAmount: minAmount };
-      }
-    } else if (transferType === 'bank') {
-      if (amountNum < MIN_AMOUNTS.BANK_TRANSFER) {
-        return { valid: false, minimumAmount: MIN_AMOUNTS.BANK_TRANSFER };
-      }
-    }
-    
-    return { valid: true };
+  public async validateMinimumAmount(amount: string, transferType: 'email' | 'wallet' | 'bank', network?: string): Promise<{ valid: boolean, minimumAmount?: number }> {
+    return feeService.validateMinimumAmount(amount, transferType, network);
   }
 
   // Get wallet balances
@@ -128,7 +83,7 @@ class WalletService {
   }
 
   // Check if user has sufficient balance
-  public async checkBalance(chatId: number, amount: string): Promise<{ sufficient: boolean, availableBalance?: string }> {
+  public async checkBalance(chatId: number, amount: string, includesFee: boolean = false): Promise<{ sufficient: boolean, availableBalance?: string }> {
     try {
       const balances = await this.getBalances(chatId);
       
@@ -139,10 +94,10 @@ class WalletService {
       // Get default wallet or the first wallet
       const defaultWallet = balances.find(wallet => wallet.isDefault) || balances[0];
       const availableBalance = defaultWallet.balance;
-      const amountToSend = parseFloat(amount);
+      const amountToCheck = includesFee ? parseFloat(amount) : parseFloat(amount);
       
       return {
-        sufficient: parseFloat(availableBalance) >= amountToSend,
+        sufficient: parseFloat(availableBalance) >= amountToCheck,
         availableBalance
       };
     } catch (error: any) {
@@ -182,15 +137,19 @@ class WalletService {
       }
       
       // Validate minimum amount
-      const validation = this.validateMinimumAmount(amount, 'email');
+      const validation = await this.validateMinimumAmount(amount, 'email');
       if (!validation.valid) {
         throw new Error(`Amount too small. Minimum amount is ${validation.minimumAmount} USDC.`);
       }
       
-      // Check if user has sufficient balance
-      const balanceCheck = await this.checkBalance(chatId, amount);
+      // Calculate fee
+      const fee = await this.calculateFee(amount, 'email', undefined, chatId);
+      const totalAmount = parseFloat(amount) + fee;
+      
+      // Check if user has sufficient balance including fee
+      const balanceCheck = await this.checkBalance(chatId, totalAmount.toString(), true);
       if (!balanceCheck.sufficient) {
-        throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC.`);
+        throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${totalAmount.toFixed(2)} USDC (includes ${fee.toFixed(2)} USDC fee).`);
       }
       
       const session = authService.getSession(chatId)!;
@@ -198,7 +157,8 @@ class WalletService {
       
       const transferRequest: TransferRequest = {
         email,
-        amount
+        amount,
+        includeFee: true // Flag to indicate API should handle fee calculation
       };
       
       const response = await apiService.post<ApiResponse<TransferResponse>>('/api/transfers/send', transferRequest);
@@ -210,7 +170,7 @@ class WalletService {
       return response.data;
     } catch (error: any) {
       console.error('Error sending funds to email:', error);
-      return null;
+      throw error; // Rethrow to allow for specific error handling in the caller
     }
   }
 
@@ -235,18 +195,20 @@ class WalletService {
       }
       
       // Validate minimum amount
-      const validation = this.validateMinimumAmount(amount, 'wallet', normalizedNetwork);
+      const validation = await this.validateMinimumAmount(amount, 'wallet', normalizedNetwork);
       if (!validation.valid) {
         throw new Error(`Amount too small. Minimum amount for ${normalizedNetwork} is ${validation.minimumAmount} USDC.`);
       }
       
-      // Check if user has sufficient balance (including fee)
-      const fee = this.calculateFee(amount, 'wallet', normalizedNetwork);
+      // Calculate fee
+      const fee = await this.calculateFee(amount, 'wallet', normalizedNetwork, chatId);
       const totalAmount = parseFloat(amount) + fee;
-      const balanceCheck = await this.checkBalance(chatId, totalAmount.toString());
+      
+      // Check if user has sufficient balance (including fee)
+      const balanceCheck = await this.checkBalance(chatId, totalAmount.toString(), true);
       
       if (!balanceCheck.sufficient) {
-        throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${totalAmount} USDC (includes ${fee} USDC fee).`);
+        throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${totalAmount.toFixed(2)} USDC (includes ${fee.toFixed(2)} USDC fee).`);
       }
       
       const session = authService.getSession(chatId)!;
@@ -255,7 +217,8 @@ class WalletService {
       const transferRequest: TransferRequest = {
         address,
         network,
-        amount
+        amount,
+        includeFee: true // Flag to indicate API should handle fee calculation
       };
       
       const response = await apiService.post<ApiResponse<TransferResponse>>('/api/transfers/wallet-withdraw', transferRequest);
@@ -267,7 +230,7 @@ class WalletService {
       return response.data;
     } catch (error: any) {
       console.error('Error sending funds to wallet:', error);
-      return null;
+      throw error; // Rethrow to allow for specific error handling in the caller
     }
   }
 
@@ -279,18 +242,20 @@ class WalletService {
       }
       
       // Validate minimum amount
-      const validation = this.validateMinimumAmount(amount, 'bank');
+      const validation = await this.validateMinimumAmount(amount, 'bank');
       if (!validation.valid) {
         throw new Error(`Amount too small. Minimum bank withdrawal is ${validation.minimumAmount} USDC.`);
       }
       
-      // Check if user has sufficient balance (including fee)
-      const fee = this.calculateFee(amount, 'bank');
+      // Calculate fee
+      const fee = await this.calculateFee(amount, 'bank', undefined, chatId);
       const totalAmount = parseFloat(amount) + fee;
-      const balanceCheck = await this.checkBalance(chatId, totalAmount.toString());
+      
+      // Check if user has sufficient balance (including fee)
+      const balanceCheck = await this.checkBalance(chatId, totalAmount.toString(), true);
       
       if (!balanceCheck.sufficient) {
-        throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${totalAmount} USDC (includes ${fee} USDC fee).`);
+        throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${totalAmount.toFixed(2)} USDC (includes ${fee.toFixed(2)} USDC fee).`);
       }
       
       const session = authService.getSession(chatId)!;
@@ -298,7 +263,8 @@ class WalletService {
       
       const transferRequest: TransferRequest = {
         bank_account_id: bankAccountId,
-        amount
+        amount,
+        includeFee: true // Flag to indicate API should handle fee calculation
       };
       
       const response = await apiService.post<ApiResponse<TransferResponse>>('/api/transfers/offramp', transferRequest);
@@ -310,40 +276,27 @@ class WalletService {
       return response.data;
     } catch (error: any) {
       console.error('Error withdrawing funds to bank:', error);
-      return null;
+      throw error; // Rethrow to allow for specific error handling in the caller
     }
   }
   
   // Get transaction fee information for display
-  public getTransactionFeeInfo(amount: string, transferType: 'email' | 'wallet' | 'bank', network?: string): { 
+  public async getTransactionFeeInfo(amount: string, transferType: 'email' | 'wallet' | 'bank', network?: string, chatId?: number): Promise<{ 
     fee: number, 
     totalAmount: number,
     feePercentage: string,
     minimumAmount: number 
-  } {
+  }> {
+    const feeCalculation = await feeService.calculateFee(amount, transferType, network, chatId);
     const amountNum = parseFloat(amount);
-    let fee = 0;
-    let minimumAmount = 0;
     
-    if (transferType === 'email') {
-      fee = FEES.EMAIL_TRANSFER;
-      minimumAmount = MIN_AMOUNTS.EMAIL_TRANSFER;
-    } else if (transferType === 'wallet' && network) {
-      const normalizedNetwork = network.toUpperCase() as keyof typeof FEES.WALLET_TRANSFER;
-      fee = FEES.WALLET_TRANSFER[normalizedNetwork] || FEES.WALLET_TRANSFER.SOLANA;
-      minimumAmount = MIN_AMOUNTS.WALLET_TRANSFER[normalizedNetwork] || MIN_AMOUNTS.WALLET_TRANSFER.SOLANA;
-    } else if (transferType === 'bank') {
-      fee = FEES.BANK_TRANSFER;
-      minimumAmount = MIN_AMOUNTS.BANK_TRANSFER;
-    }
-    
-    const totalAmount = amountNum + fee;
-    const feePercentage = ((fee / amountNum) * 100).toFixed(2);
+    const minimumAmountValidation = await this.validateMinimumAmount(amount, transferType, network);
+    const minimumAmount = minimumAmountValidation.minimumAmount || 0;
     
     return {
-      fee,
-      totalAmount,
-      feePercentage,
+      fee: feeCalculation.fee,
+      totalAmount: feeCalculation.totalAmount,
+      feePercentage: feeCalculation.feePercentage.toFixed(2),
       minimumAmount
     };
   }

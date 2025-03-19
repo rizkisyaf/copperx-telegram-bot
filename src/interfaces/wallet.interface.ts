@@ -30,4 +30,5 @@ export interface TransferRequest {
   address?: string;
   network?: string;
   bank_account_id?: string;
+  includeFee?: boolean;
 } 
