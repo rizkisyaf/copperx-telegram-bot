@@ -1,149 +1,167 @@
 import apiService from './api.service';
+import databaseService from './database.service';
+import notificationService from './notification.service';
 import { LoginResponse, ApiResponse, ProfileResponse, KycResponse } from '../interfaces/api.interface';
 import { User, UserSession, OTPRequest } from '../interfaces/user.interface';
 
-class AuthService {
-  private sessions: Map<number, UserSession> = new Map(); // Map Telegram chatId to user session
-  private otpRequests: Map<number, OTPRequest> = new Map(); // Store active OTP requests
+// Local session type to avoid conflicts with imported interfaces
+interface SessionData {
+  email?: string;
+  token?: string;
+  requestId?: string;
+  organizationId?: string;
+  isAuthenticated: boolean;
+}
 
-  // Request OTP for login
+// Track user sessions
+interface UserSessions {
+  [chatId: string]: SessionData;
+}
+
+class AuthService {
+  private sessions: UserSessions = {};
+
+  // Request email OTP
   public async requestOTP(email: string, chatId: number): Promise<boolean> {
     try {
-      await apiService.post<ApiResponse<any>>('/api/auth/email-otp/request', { email });
+      const response = await apiService.post<ApiResponse<{ requestId: string }>>('/api/auth/email-otp/request', { email });
       
-      // Store the OTP request for verification later
-      this.otpRequests.set(chatId, { email, chatId });
+      if (!response.data || !response.data.requestId) {
+        throw new Error('Failed to request OTP');
+      }
+      
+      // Store email and requestId in session
+      this.sessions[chatId] = {
+        email,
+        requestId: response.data.requestId,
+        isAuthenticated: false
+      };
       
       return true;
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error requesting OTP:', error);
       return false;
     }
   }
 
   // Authenticate with OTP
-  public async authenticateWithOTP(otp: string, chatId: number): Promise<User | null> {
+  public async authenticateWithOTP(otp: string, chatId: number): Promise<{ email: string } | null> {
     try {
-      const otpRequest = this.otpRequests.get(chatId);
+      const session = this.sessions[chatId];
       
-      if (!otpRequest) {
-        throw new Error('No active OTP request found');
+      if (!session || !session.email || !session.requestId) {
+        throw new Error('No active login session');
       }
       
-      const response = await apiService.post<ApiResponse<LoginResponse>>('/api/auth/email-otp/authenticate', {
-        email: otpRequest.email,
-        otp
+      const response = await apiService.post<ApiResponse<{ token: string; organizationId: string }>>('/api/auth/email-otp/authenticate', {
+        email: session.email,
+        otp,
+        requestId: session.requestId
       });
       
       if (!response.data || !response.data.token) {
         throw new Error('Authentication failed');
       }
       
-      const { token, user } = response.data;
-      
-      // Set the token for future API requests
-      apiService.setToken(token);
-      
-      // Create user session
-      const userSession: UserSession = {
-        userId: user.id,
-        token,
-        email: user.email,
-        organizationId: user.organization.id,
-        expires: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours from now
+      // Update session with token and mark as authenticated
+      this.sessions[chatId] = {
+        ...session,
+        token: response.data.token,
+        organizationId: response.data.organizationId,
+        isAuthenticated: true
       };
       
-      // Store the session
-      this.sessions.set(chatId, userSession);
+      // Register with notification service
+      if (response.data.organizationId) {
+        notificationService.addUserToMapping(chatId, response.data.organizationId, response.data.token);
+      }
       
-      // Clean up the OTP request
-      this.otpRequests.delete(chatId);
-      
-      return {
-        id: user.id,
-        email: user.email,
-        token,
-        organizationId: user.organization.id,
-        chatId
-      };
-    } catch (error) {
+      return { email: session.email };
+    } catch (error: any) {
       console.error('Error authenticating with OTP:', error);
       return null;
     }
   }
 
-  // Get user session by chatId
-  public getSession(chatId: number): UserSession | undefined {
-    return this.sessions.get(chatId);
+  // Get user session
+  public getSession(chatId: number): SessionData | null {
+    return this.sessions[chatId] || null;
   }
 
-  // Check if a user is authenticated
+  // Check if user is authenticated
   public isAuthenticated(chatId: number): boolean {
-    const session = this.sessions.get(chatId);
-    
-    if (!session) {
-      return false;
-    }
-    
-    // Check if the session has expired
-    if (session.expires < new Date()) {
-      this.logout(chatId);
-      return false;
-    }
-    
-    return true;
+    return !!this.sessions[chatId]?.isAuthenticated;
   }
 
-  // Fetch user profile
-  public async getProfile(chatId: number): Promise<ProfileResponse | null> {
+  // Get user profile
+  public async getProfile(chatId: number): Promise<any | null> {
     try {
-      if (!this.isAuthenticated(chatId)) {
+      const session = this.sessions[chatId];
+      
+      if (!session || !session.isAuthenticated || !session.token) {
         throw new Error('User not authenticated');
       }
       
-      const session = this.sessions.get(chatId)!;
       apiService.setToken(session.token);
       
-      const response = await apiService.get<ApiResponse<ProfileResponse>>('/api/auth/me');
+      const response = await apiService.get<ApiResponse<any>>('/api/auth/me');
       
       if (!response.data) {
-        throw new Error('Failed to get profile');
+        throw new Error('Failed to fetch profile');
       }
       
       return response.data;
-    } catch (error) {
-      console.error('Error getting profile:', error);
+    } catch (error: any) {
+      console.error('Error fetching profile:', error);
+      
+      // Handle token expiration
+      if (error.status === 401 || (error.response && error.response.status === 401)) {
+        this.logout(chatId);
+      }
+      
       return null;
     }
   }
 
-  // Fetch KYC status
-  public async getKycStatus(chatId: number): Promise<KycResponse | null> {
+  // Get KYC status
+  public async getKycStatus(chatId: number): Promise<any | null> {
     try {
-      if (!this.isAuthenticated(chatId)) {
+      const session = this.sessions[chatId];
+      
+      if (!session || !session.isAuthenticated || !session.token) {
         throw new Error('User not authenticated');
       }
       
-      const session = this.sessions.get(chatId)!;
       apiService.setToken(session.token);
       
-      const response = await apiService.get<ApiResponse<KycResponse>>('/api/kycs');
+      const response = await apiService.get<ApiResponse<any>>('/api/kycs');
       
       if (!response.data) {
-        throw new Error('Failed to get KYC status');
+        throw new Error('Failed to fetch KYC status');
       }
       
       return response.data;
-    } catch (error) {
-      console.error('Error getting KYC status:', error);
+    } catch (error: any) {
+      console.error('Error fetching KYC status:', error);
+      
+      // Handle token expiration
+      if (error.status === 401 || (error.response && error.response.status === 401)) {
+        this.logout(chatId);
+      }
+      
       return null;
     }
   }
 
   // Logout user
   public logout(chatId: number): void {
-    this.sessions.delete(chatId);
-    apiService.clearToken();
+    // Notify notification service before removing the session
+    if (this.sessions[chatId]?.organizationId) {
+      notificationService.removeUserFromMapping(chatId);
+    }
+    
+    // Clear session
+    delete this.sessions[chatId];
   }
 }
 
