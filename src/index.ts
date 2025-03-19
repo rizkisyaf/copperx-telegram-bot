@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import authService from './services/auth.service';
 import walletService from './services/wallet.service';
 import notificationService from './services/notification.service';
+import apiService from './services/api.service';
 
 // Utils
 import conversationManager, { ConversationState } from './utils/conversation';
@@ -21,6 +22,54 @@ notificationService.setBot(bot);
 
 // Middleware
 bot.use(session());
+
+// Error handling middleware
+bot.use(async (ctx, next) => {
+  try {
+    // Check API availability before proceeding
+    const isApiReachable = await apiService.isReachable();
+    if (!isApiReachable) {
+      console.error('API is not reachable');
+      // Only notify about API issues once every 5 minutes per chat
+      const now = Date.now();
+      const lastApiErrorNotification = ctx.session?.lastApiErrorNotification || 0;
+      
+      if (now - lastApiErrorNotification > 5 * 60 * 1000) {
+        await ctx.reply('⚠️ The service is currently experiencing technical difficulties. Please try again in a few minutes.');
+        ctx.session = { ...ctx.session, lastApiErrorNotification: now };
+      }
+      return;
+    }
+    
+    // If API is reachable, proceed to the next middleware
+    await next();
+  } catch (error: any) {
+    // Log the error
+    console.error('Bot error:', error);
+    
+    // Send user-friendly error message
+    let errorMessage = 'Sorry, an error occurred while processing your request.';
+    
+    // Check for specific error types
+    if (error.message.includes('Too Many Requests')) {
+      errorMessage = '⚠️ You\'re sending too many requests. Please wait a moment before trying again.';
+    } else if (error.message.includes('not authenticated') || error.message.includes('Unauthorized')) {
+      errorMessage = '⚠️ Your session has expired. Please log in again with /login';
+      
+      // Force logout if session is invalid
+      if (ctx.chat?.id) {
+        authService.logout(ctx.chat.id);
+        conversationManager.clearChat(ctx.chat.id);
+      }
+    }
+    
+    try {
+      await ctx.reply(errorMessage);
+    } catch (e) {
+      console.error('Error sending error message to user:', e);
+    }
+  }
+});
 
 // Start command
 bot.start(async (ctx) => {
@@ -236,7 +285,29 @@ bot.command('bank', async (ctx) => {
     return;
   }
   
-  await ctx.reply('Bank withdrawals are currently not available through the bot. Please use the Copperx web app for this feature.');
+  // Check if user has bank accounts
+  const bankAccounts = await walletService.getBankAccounts(chatId);
+  
+  if (!bankAccounts || bankAccounts.length === 0) {
+    await ctx.reply('You don\'t have any bank accounts linked to your Copperx account. Please add a bank account through the web app first.');
+    return;
+  }
+  
+  // Create buttons for each bank account
+  const buttons = bankAccounts.map((account) => [
+    Markup.button.callback(
+      `${account.bankName} - ${account.accountNumberMasked}`,
+      `bank_account:${account.id}`
+    )
+  ]);
+  
+  // Set state and wait for bank selection
+  conversationManager.setState(chatId, ConversationState.WAITING_FOR_BANK_ACCOUNT);
+  
+  await ctx.reply(
+    'Select a bank account to withdraw to:',
+    Markup.inlineKeyboard(buttons)
+  );
 });
 
 // History command
@@ -346,6 +417,19 @@ bot.on('callback_query', async (ctx) => {
     return;
   }
   
+  // Bank account selection
+  if (callbackData.startsWith('bank_account:')) {
+    const bankAccountId = callbackData.split(':')[1];
+    
+    if (conversationManager.getState(chatId) === ConversationState.WAITING_FOR_BANK_ACCOUNT) {
+      conversationManager.updateContext(chatId, { bankAccountId });
+      conversationManager.setState(chatId, ConversationState.WAITING_FOR_BANK_AMOUNT);
+      
+      await ctx.editMessageText(`Bank account selected. Please enter the amount to withdraw:`);
+    }
+    return;
+  }
+  
   // Network selection for wallet withdraw
   if (callbackData.startsWith('network:')) {
     const network = callbackData.split(':')[1];
@@ -380,6 +464,14 @@ bot.on('callback_query', async (ctx) => {
         await ctx.editMessageText(`Transaction completed! ${context.amount} USDC sent to ${context.walletAddress}.`);
       } else {
         await ctx.editMessageText('Transaction failed. Please try again later.');
+      }
+    } else if (state === ConversationState.WAITING_FOR_BANK_CONFIRMATION) {
+      const result = await walletService.withdrawToBank(chatId, context.bankAccountId!, context.amount!);
+      
+      if (result) {
+        await ctx.editMessageText(`Withdrawal initiated! ${context.amount} USDC will be sent to your bank account. This may take 1-3 business days to complete.`);
+      } else {
+        await ctx.editMessageText('Withdrawal failed. Please try again later.');
       }
     }
     
@@ -475,7 +567,34 @@ bot.on('text', async (ctx) => {
       return;
     }
     
-    conversationManager.updateContext(chatId, { amount });
+    // Validate minimum amount and check fees
+    const validation = walletService.validateMinimumAmount(amount, 'email');
+    if (!validation.valid) {
+      await ctx.reply(`Amount too small. Minimum amount for email transfers is ${validation.minimumAmount} USDC.`);
+      return;
+    }
+    
+    // Check balance
+    const balanceCheck = await walletService.checkBalance(chatId, amount);
+    if (!balanceCheck.sufficient) {
+      await ctx.reply(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC.`);
+      return;
+    }
+    
+    // Calculate fee
+    const fee = walletService.calculateFee(amount, 'email');
+    const feeInfo = walletService.getTransactionFeeInfo(amount, 'email');
+    
+    // Show fee information
+    await ctx.replyWithMarkdown(formatter.formatTransactionFee(
+      amount,
+      feeInfo.fee,
+      feeInfo.totalAmount,
+      feeInfo.feePercentage
+    ));
+    
+    // Update context with amount and fee
+    conversationManager.updateContext(chatId, { amount, fee: feeInfo.fee });
     conversationManager.setState(chatId, ConversationState.WAITING_FOR_SEND_CONFIRMATION);
     
     const context = conversationManager.getContext(chatId);
@@ -540,8 +659,88 @@ bot.on('text', async (ctx) => {
       return;
     }
     
-    conversationManager.updateContext(chatId, { amount });
+    const context = conversationManager.getContext(chatId);
+    const network = context.network;
+    
+    // Validate minimum amount
+    const validation = walletService.validateMinimumAmount(amount, 'wallet', network);
+    if (!validation.valid) {
+      await ctx.reply(`Amount too small. Minimum amount for ${network.toUpperCase()} transfers is ${validation.minimumAmount} USDC.`);
+      return;
+    }
+    
+    // Calculate fee
+    const feeInfo = walletService.getTransactionFeeInfo(amount, 'wallet', network);
+    
+    // Check if user has sufficient balance
+    const balanceCheck = await walletService.checkBalance(chatId, feeInfo.totalAmount.toString());
+    if (!balanceCheck.sufficient) {
+      await ctx.reply(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${feeInfo.totalAmount} USDC (includes ${feeInfo.fee} USDC fee).`);
+      return;
+    }
+    
+    // Show fee information
+    await ctx.replyWithMarkdown(formatter.formatTransactionFee(
+      amount,
+      feeInfo.fee,
+      feeInfo.totalAmount,
+      feeInfo.feePercentage
+    ));
+    
+    // Update context with amount and fee
+    conversationManager.updateContext(chatId, { amount, fee: feeInfo.fee });
     conversationManager.setState(chatId, ConversationState.WAITING_FOR_WALLET_CONFIRMATION);
+    
+    const confirmationMessage = formatter.formatConfirmationMessage(context);
+    
+    await ctx.replyWithMarkdown(
+      confirmationMessage,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Confirm ✅', 'confirm_transaction')],
+        [Markup.button.callback('Cancel ❌', 'cancel_transaction')]
+      ])
+    );
+    return;
+  }
+  
+  // Bank withdraw flow
+  if (state === ConversationState.WAITING_FOR_BANK_AMOUNT) {
+    const amount = text.trim();
+    
+    // Validate amount
+    if (isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
+      await ctx.reply('Please enter a valid amount greater than 0.');
+      return;
+    }
+    
+    // Validate minimum amount
+    const validation = walletService.validateMinimumAmount(amount, 'bank');
+    if (!validation.valid) {
+      await ctx.reply(`Amount too small. Minimum amount for bank withdrawals is ${validation.minimumAmount} USDC.`);
+      return;
+    }
+    
+    // Calculate fee
+    const feeInfo = walletService.getTransactionFeeInfo(amount, 'bank');
+    
+    // Check if user has sufficient balance
+    const balanceCheck = await walletService.checkBalance(chatId, feeInfo.totalAmount.toString());
+    if (!balanceCheck.sufficient) {
+      await ctx.reply(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${feeInfo.totalAmount} USDC (includes ${feeInfo.fee} USDC fee).`);
+      return;
+    }
+    
+    // Show fee information
+    await ctx.replyWithMarkdown(formatter.formatTransactionFee(
+      amount,
+      feeInfo.fee,
+      feeInfo.totalAmount,
+      feeInfo.feePercentage
+    ));
+    
+    // Update context with amount and fee
+    conversationManager.updateContext(chatId, { amount, fee: feeInfo.fee });
+    conversationManager.setState(chatId, ConversationState.WAITING_FOR_BANK_CONFIRMATION);
     
     const context = conversationManager.getContext(chatId);
     const confirmationMessage = formatter.formatConfirmationMessage(context);
