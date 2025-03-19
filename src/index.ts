@@ -1,6 +1,7 @@
 import { Telegraf, session, Markup } from 'telegraf';
 import { Context, Session } from './interfaces/context.interface';
 import dotenv from 'dotenv';
+import http from 'http';
 
 // Services
 import authService from './services/auth.service';
@@ -18,6 +19,23 @@ import * as formatter from './utils/formatter';
 
 // Load environment variables
 dotenv.config();
+
+// Create HTTP server for health check endpoint
+const server = http.createServer((req, res) => {
+  if (req.url === '/health' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
+// Start HTTP server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Health check server running on port ${PORT}`);
+});
 
 // Initialize bot with our custom context type
 const bot = new Telegraf<Context>(process.env.BOT_TOKEN!);
