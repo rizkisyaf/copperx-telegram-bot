@@ -14,6 +14,11 @@ export enum ConversationState {
   WAITING_FOR_BANK_AMOUNT = 'WAITING_FOR_BANK_AMOUNT',
   WAITING_FOR_BANK_CONFIRMATION = 'WAITING_FOR_BANK_CONFIRMATION',
   WAITING_FOR_DEFAULT_WALLET = 'WAITING_FOR_DEFAULT_WALLET',
+  WAITING_FOR_EXTERNAL_WALLET = 'WAITING_FOR_EXTERNAL_WALLET',
+  WAITING_FOR_EXTERNAL_WALLET_NETWORK = 'WAITING_FOR_EXTERNAL_WALLET_NETWORK',
+  WAITING_FOR_EXTERNAL_WALLET_AMOUNT = 'WAITING_FOR_EXTERNAL_WALLET_AMOUNT',
+  WAITING_FOR_EXTERNAL_WALLET_CONFIRMATION = 'WAITING_FOR_EXTERNAL_WALLET_CONFIRMATION',
+  WAITING_FOR_WITHDRAWAL_FINAL_CONFIRMATION = 'WAITING_FOR_WITHDRAWAL_FINAL_CONFIRMATION'
 }
 
 // Transaction context to store information between conversation steps
@@ -24,6 +29,7 @@ export interface TransactionContext {
   network?: string;
   bankAccountId?: string;
   walletId?: string;
+  externalWalletAddress?: string;
 }
 
 // Class to manage conversation states
@@ -33,11 +39,14 @@ class ConversationManager {
 
   // Get current state for a chat
   public getState(chatId: number): ConversationState {
-    return this.states.get(chatId) || ConversationState.IDLE;
+    const state = this.states.get(chatId) || ConversationState.IDLE;
+    console.log(`[CONVERSATION_MANAGER] Getting state for chat ${chatId}: ${state}`);
+    return state;
   }
 
   // Set state for a chat
   public setState(chatId: number, state: ConversationState): void {
+    console.log(`[CONVERSATION_MANAGER] Setting state for chat ${chatId} from ${this.states.get(chatId) || 'NONE'} to ${state}`);
     this.states.set(chatId, state);
   }
 
@@ -59,12 +68,14 @@ class ConversationManager {
 
   // Clear state and context for a chat
   public clearChat(chatId: number): void {
+    console.log(`[CONVERSATION_MANAGER] Clearing chat state and context for ${chatId}`);
     this.states.delete(chatId);
     this.contexts.delete(chatId);
   }
 
   // Reset to idle state but keep context
   public resetState(chatId: number): void {
+    console.log(`[CONVERSATION_MANAGER] Resetting state for chat ${chatId} from ${this.states.get(chatId) || 'NONE'} to IDLE`);
     this.setState(chatId, ConversationState.IDLE);
   }
 }
