@@ -1,4 +1,5 @@
 import { Telegraf, session, Markup } from 'telegraf';
+import { Context, Session } from './interfaces/context.interface';
 import dotenv from 'dotenv';
 
 // Services
@@ -6,6 +7,10 @@ import authService from './services/auth.service';
 import walletService from './services/wallet.service';
 import notificationService from './services/notification.service';
 import apiService from './services/api.service';
+
+// Commands
+import bulkTransferCommand from './commands/bulk-transfer.command';
+import paymentLinkCommand from './commands/payment-link.command';
 
 // Utils
 import conversationManager, { ConversationState } from './utils/conversation';
@@ -15,10 +20,19 @@ import * as formatter from './utils/formatter';
 dotenv.config();
 
 // Initialize bot
-const bot = new Telegraf(process.env.BOT_TOKEN!);
+const bot = new Telegraf<Context>(process.env.BOT_TOKEN!);
 
 // Set the bot instance for notification service
 notificationService.setBot(bot);
+
+// Configure session middleware
+bot.use(session<Session>({
+  defaultSession: () => ({
+    auth: {
+      isAuthenticated: false
+    }
+  })
+}));
 
 // Middleware
 bot.use(session());
@@ -71,34 +85,31 @@ bot.use(async (ctx, next) => {
   }
 });
 
+// Register command modules
+bot.use(bulkTransferCommand);
+bot.use(paymentLinkCommand);
+
 // Start command
 bot.start(async (ctx) => {
-  const chatId = ctx.chat.id;
-  conversationManager.clearChat(chatId);
+  const welcomeMessage = 
+    '👋 *Welcome to the Copperx Bot!*\n\n' +
+    'I can help you manage your Copperx account, transfer funds, and more.\n\n' +
+    '📋 *Available Commands:*\n' +
+    '/login - Log in to your Copperx account\n' +
+    '/profile - View your account profile\n' +
+    '/balance - Check your wallet balances\n' +
+    '/send - Send USDC to an email address\n' +
+    '/withdraw - Withdraw USDC to an external wallet\n' +
+    '/bank - Withdraw USDC to a bank account\n' +
+    '/history - View your transaction history\n' +
+    '/deposit - Show deposit information\n' +
+    '/setdefault - Set your default wallet\n' +
+    '/bulktransfer - Send USDC to multiple recipients at once\n' +
+    '/paymentlink - Create a payment link\n' +
+    '/logout - Log out from your account\n\n' +
+    'To get started, use /login to connect your Copperx account.';
   
-  const welcomeMessage = `
-🚀 *Welcome to the Copperx Bot!* 🚀
-
-This bot allows you to manage your Copperx account directly from Telegram.
-
-*Available Commands*:
-/login - Log in to your Copperx account
-/logout - Log out from your account
-/profile - View your account profile
-/balance - Check your wallet balances
-/setdefault - Set your default wallet
-/send - Send USDC to an email address
-/withdraw - Withdraw USDC to an external wallet
-/bank - Withdraw USDC to a bank account
-/history - View your transaction history
-/deposit - Show deposit information
-/simulate - Simulate a deposit notification (for testing)
-/help - Show this help message
-
-Need help? Join our community: https://t.me/copperxcommunity/2183
-  `;
-  
-  await ctx.replyWithMarkdown(welcomeMessage);
+  await ctx.reply(welcomeMessage, { parse_mode: 'Markdown' });
 });
 
 // Help command
