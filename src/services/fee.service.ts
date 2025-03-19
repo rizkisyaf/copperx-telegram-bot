@@ -99,9 +99,10 @@ class FeeService {
         apiService.setToken(session.token);
         
         // Call the API endpoint to calculate the fee
-        const response = await apiService.post<ApiResponse<FeeCalculationResponse>>('/api/calculate-fee', {
+        // Using the transfers/fee endpoint as per API docs
+        const response = await apiService.post<ApiResponse<FeeCalculationResponse>>('/api/transfers/fee', {
           amount,
-          transferType,
+          type: transferType,
           network: network || undefined
         });
         
@@ -124,17 +125,53 @@ class FeeService {
    */
   private async refreshFeeData(): Promise<void> {
     try {
-      // Use a common authentication token for these requests
-      // In a production environment, this might be a system-level API key
-      const response = await apiService.get<ApiResponse<{
+      // First try to get the fees with authentication if possible
+      let feeResponse = null;
+      let minimumResponse = null;
+      
+      try {
+        // Try to get fees from the transfers/fees-config endpoint
+        feeResponse = await apiService.get<ApiResponse<FeeStructure>>('/api/transfers/fees-config');
+        
+        // Try to get minimum amounts from the transfers/minimum-amounts endpoint
+        minimumResponse = await apiService.get<ApiResponse<MinimumAmounts>>('/api/transfers/minimum-amounts');
+      } catch (error) {
+        console.warn('Could not fetch fee data from authenticated endpoints:', error);
+      }
+      
+      // If either request succeeded, use the data
+      if (feeResponse?.data) {
+        this.feeStructure = feeResponse.data;
+      }
+      
+      if (minimumResponse?.data) {
+        this.minimumAmounts = minimumResponse.data;
+      }
+      
+      // If both requests succeeded, update lastFetched
+      if (feeResponse?.data && minimumResponse?.data) {
+        this.lastFetched = Date.now();
+        return;
+      }
+      
+      // If we still don't have data, try the public endpoints
+      const publicConfig = await apiService.get<ApiResponse<{
         fees: FeeStructure;
         minimumAmounts: MinimumAmounts;
-      }>>('/api/fee-structure');
+      }>>('/api/config/fee-structure');
       
-      if (response.data) {
-        this.feeStructure = response.data.fees;
-        this.minimumAmounts = response.data.minimumAmounts;
+      if (publicConfig?.data) {
+        if (!this.feeStructure && publicConfig.data.fees) {
+          this.feeStructure = publicConfig.data.fees;
+        }
+        
+        if (!this.minimumAmounts && publicConfig.data.minimumAmounts) {
+          this.minimumAmounts = publicConfig.data.minimumAmounts;
+        }
+        
         this.lastFetched = Date.now();
+      } else {
+        throw new Error('Could not fetch fee configuration from API');
       }
     } catch (error) {
       console.error('Error fetching fee data from API:', error);
