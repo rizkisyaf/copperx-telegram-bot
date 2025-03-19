@@ -27,7 +27,11 @@ class WalletService {
         throw new Error('User not authenticated');
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const response = await apiService.get<ApiResponse<string[]>>('/api/networks');
@@ -59,16 +63,18 @@ class WalletService {
   public async calculateBulkFee(totalAmount: string, recipientCount: number, chatId?: number): Promise<number> {
     try {
       if (chatId && authService.isAuthenticated(chatId)) {
-        const session = authService.getSession(chatId)!;
-        apiService.setToken(session.token);
-        
-        const response = await apiService.post<ApiResponse<{fee: number}>>('/api/calculate-bulk-fee', {
-          amount: totalAmount,
-          recipientCount
-        });
-        
-        if (response.data && typeof response.data.fee === 'number') {
-          return response.data.fee;
+        const session = authService.getSession(chatId);
+        if (session && session.token) {
+          apiService.setToken(session.token);
+          
+          const response = await apiService.post<ApiResponse<{fee: number}>>('/api/calculate-bulk-fee', {
+            amount: totalAmount,
+            recipientCount
+          });
+          
+          if (response.data && typeof response.data.fee === 'number') {
+            return response.data.fee;
+          }
         }
       }
       
@@ -94,7 +100,11 @@ class WalletService {
         throw new Error('User not authenticated');
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const response = await apiService.get<ApiResponse<WalletBalanceResponse[]>>('/api/wallets/balances');
@@ -117,7 +127,11 @@ class WalletService {
         throw new Error('User not authenticated');
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const response = await apiService.get<ApiResponse<WalletResponse[]>>('/api/wallets');
@@ -140,7 +154,11 @@ class WalletService {
         throw new Error('User not authenticated');
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       await apiService.post<ApiResponse<any>>('/api/wallets/default', { walletId });
@@ -183,7 +201,11 @@ class WalletService {
         throw new Error('User not authenticated');
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       let url = `/api/transfers?page=${page}&limit=${limit}`;
@@ -226,7 +248,11 @@ class WalletService {
         throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${totalAmount.toFixed(2)} USDC (includes ${fee.toFixed(2)} USDC fee).`);
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const transferRequest: TransferRequest = {
@@ -304,7 +330,11 @@ class WalletService {
         throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${totalWithFee.toFixed(2)} USDC (includes ${bulkFee.toFixed(2)} USDC bulk fee).`);
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const bulkTransferRequest: BulkTransferRequest = {
@@ -363,7 +393,11 @@ class WalletService {
         throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${totalAmount.toFixed(2)} USDC (includes ${fee.toFixed(2)} USDC fee).`);
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const transferRequest: TransferRequest = {
@@ -410,7 +444,11 @@ class WalletService {
         throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${totalAmount.toFixed(2)} USDC (includes ${fee.toFixed(2)} USDC fee).`);
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const transferRequest: TransferRequest = {
@@ -485,7 +523,11 @@ class WalletService {
         throw new Error('User not authenticated');
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const response = await apiService.get<ApiResponse<BankAccountResponse[]>>('/api/bank-accounts');
@@ -513,7 +555,11 @@ class WalletService {
         throw new Error('User not authenticated');
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const payload = {
@@ -542,7 +588,11 @@ class WalletService {
         throw new Error('User not authenticated');
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const response = await apiService.get<ApiResponse<any[]>>('/api/address-book');
@@ -576,7 +626,11 @@ class WalletService {
         throw new Error(`Unsupported network: ${network}`);
       }
       
-      const session = authService.getSession(chatId)!;
+      const session = authService.getSession(chatId);
+      if (!session || !session.token) {
+        throw new Error('Invalid session data');
+      }
+      
       apiService.setToken(session.token);
       
       const payload = {
