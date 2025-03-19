@@ -1,7 +1,12 @@
-import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+// Extended config type that includes __retryCount
+interface ExtendedAxiosRequestConfig extends InternalAxiosRequestConfig {
+  __retryCount?: number;
+}
 
 // API Error class for structured error handling
 class ApiError extends Error {
@@ -20,10 +25,14 @@ class ApiService {
   private api: AxiosInstance;
   private token: string | null = null;
   private maxRetries: number = 3;
+  private apiUrl: string;
 
   constructor() {
+    this.apiUrl = process.env.COPPERX_API_URL || 'https://income-api.copperx.io';
+    console.log(`[API] Initializing API service with base URL: ${this.apiUrl}`);
+
     this.api = axios.create({
-      baseURL: process.env.COPPERX_API_URL || 'https://income-api.copperx.io',
+      baseURL: this.apiUrl,
       timeout: 15000, // Increased timeout for more reliable connections
       headers: {
         'Content-Type': 'application/json',
@@ -36,33 +45,66 @@ class ApiService {
       if (this.token) {
         config.headers.Authorization = `Bearer ${this.token}`;
       }
+      
+      // Log outgoing requests (but mask sensitive data)
+      const logConfig = { ...config };
+      if (logConfig.url && logConfig.url.includes('auth')) {
+        console.log(`[API] Making ${config.method?.toUpperCase()} request to ${config.url}`);
+        
+        // Don't log full body of auth requests to avoid exposing sensitive info
+        if (logConfig.data) {
+          const maskedData = { ...logConfig.data };
+          if (maskedData.email) maskedData.email = `${maskedData.email.substring(0, 3)}...`;
+          if (maskedData.otp) maskedData.otp = '******';
+          if (maskedData.password) maskedData.password = '******';
+          console.log('[API] Request data (masked):', maskedData);
+        }
+      }
+      
       return config;
     });
     
     // Add a response interceptor for error handling
     this.api.interceptors.response.use(
-      response => response,
+      response => {
+        // Log successful responses (but mask sensitive data for auth endpoints)
+        if (response.config.url && response.config.url.includes('auth')) {
+          console.log(`[API] Received response from ${response.config.url} with status ${response.status}`);
+          
+          // Don't log the entire response for auth endpoints
+          const maskedData = { success: true, status: response.status };
+          console.log('[API] Response data (masked):', maskedData);
+        }
+        
+        return response;
+      },
       async (error: AxiosError) => {
-        const config = error.config;
+        const config = error.config as ExtendedAxiosRequestConfig;
         
         if (!config) {
           return Promise.reject(error);
         }
         
-        // @ts-ignore - Add retries count to config
+        // Log API errors (but mask sensitive data)
+        if (config.url && config.url.includes('auth')) {
+          console.error(`[API] Error in ${config.method?.toUpperCase()} request to ${config.url}`);
+          console.error(`[API] Status: ${error.response?.status}, Message: ${error.message}`);
+        }
+        
+        // Initialize or get the retry count
         config.__retryCount = config.__retryCount || 0;
         
         // Check if we should retry the request
         if (this.shouldRetry(error)) {
-          // @ts-ignore - Increment retry count
+          // Increment retry count
           config.__retryCount += 1;
           
           // Check if we've reached max retries
-          // @ts-ignore
           if (config.__retryCount <= this.maxRetries) {
             // Exponential backoff
-            // @ts-ignore
             const backoff = Math.pow(2, config.__retryCount) * 1000;
+            
+            console.log(`[API] Retrying request to ${config.url} after ${backoff}ms (attempt ${config.__retryCount}/${this.maxRetries})`);
             
             // Wait for backoff time
             await new Promise(resolve => setTimeout(resolve, backoff));
@@ -189,9 +231,12 @@ class ApiService {
   // Check if the API is reachable
   public async isReachable(): Promise<boolean> {
     try {
-      await this.api.get('/health');
+      console.log(`[API] Checking if API is reachable at ${this.apiUrl}`);
+      await this.api.get('/api/health');
+      console.log('[API] API is reachable');
       return true;
     } catch (error) {
+      console.error('[API] API health check failed:', error);
       return false;
     }
   }
