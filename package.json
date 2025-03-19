@@ -1,26 +1,53 @@
 {
   "name": "copperx-telegram-bot",
   "version": "1.0.0",
+  "description": "Telegram bot for managing Copperx wallet, transfers, and notifications",
   "main": "dist/index.js",
   "scripts": {
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "build": "tsc",
-    "watch": "tsc -w"
+    "watch": "tsc -w",
+    "lint": "eslint . --ext .ts",
+    "test": "jest",
+    "backup": "node dist/scripts/backup.js",
+    "prod": "NODE_ENV=production node dist/index.js",
+    "prod:pm2": "pm2 start ecosystem.config.js",
+    "cleanup": "node dist/scripts/cleanup.js",
+    "health-check": "ts-node src/scripts/health-check.ts",
+    "prestart": "npm run health-check"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "telegram",
+    "bot",
+    "copperx",
+    "wallet",
+    "cryptocurrency",
+    "notifications"
+  ],
+  "author": "Copperx Team",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "axios": "^1.8.3",
     "dotenv": "^16.4.7",
+    "lowdb": "^1.0.0",
     "pusher": "^5.2.0",
+    "pusher-js": "^8.4.0",
     "telegraf": "^4.16.3"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/lowdb": "^1.0.15",
     "@types/node": "^22.13.10",
+    "@typescript-eslint/eslint-plugin": "^7.12.0",
+    "@typescript-eslint/parser": "^7.12.0",
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   }
 }
