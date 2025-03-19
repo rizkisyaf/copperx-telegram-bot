@@ -1,7 +1,7 @@
 import { Composer, Markup } from 'telegraf';
 import { Context } from '../interfaces/context.interface';
 import walletService from '../services/wallet.service';
-import { formatter } from '../utils/formatter';
+import * as formatter from '../utils/formatter';
 
 const paymentLinkCommand = new Composer<Context>();
 
@@ -142,6 +142,10 @@ paymentLinkCommand.action('payment_confirm', async (ctx) => {
     );
     
     // Create the payment link
+    if (!ctx.chat) {
+      throw new Error('Chat context is not available');
+    }
+    
     const result = await walletService.createPaymentLink(
       ctx.chat.id,
       amount!,
@@ -164,7 +168,7 @@ paymentLinkCommand.action('payment_confirm', async (ctx) => {
       'Share this link with anyone who needs to pay you USDC.',
       { 
         parse_mode: 'Markdown',
-        disable_web_page_preview: true
+        link_preview_options: { is_disabled: true }
       }
     );
     

@@ -1,7 +1,7 @@
 import { Composer, Markup } from 'telegraf';
 import { Context } from '../interfaces/context.interface';
 import walletService from '../services/wallet.service';
-import { formatter } from '../utils/formatter';
+import * as formatter from '../utils/formatter';
 import { BulkRecipient } from '../interfaces/wallet.interface';
 
 const bulkTransferCommand = new Composer<Context>();
@@ -36,6 +36,13 @@ bulkTransferCommand.command('bulktransfer', async (ctx) => {
  * Handle manual adding of recipients
  */
 bulkTransferCommand.action('bulk_add_manually', async (ctx) => {
+  if (!ctx.session.bulkTransfer) {
+    ctx.session.bulkTransfer = {
+      recipients: [],
+      currentStep: 'init'
+    };
+  }
+  
   ctx.session.bulkTransfer.currentStep = 'add_email';
   await ctx.editMessageText(
     '✉️ *Add Recipient*\n\n' +
@@ -133,6 +140,13 @@ bulkTransferCommand.on('text', async (ctx) => {
  * Handle adding another recipient
  */
 bulkTransferCommand.action('bulk_add_another', async (ctx) => {
+  if (!ctx.session.bulkTransfer) {
+    ctx.session.bulkTransfer = {
+      recipients: [],
+      currentStep: 'init'
+    };
+  }
+  
   ctx.session.bulkTransfer.currentStep = 'add_email';
   ctx.session.bulkTransfer.currentEmail = undefined;
   
@@ -151,6 +165,11 @@ bulkTransferCommand.action('bulk_add_another', async (ctx) => {
  * Handle the review action to show a summary before confirming
  */
 bulkTransferCommand.action('bulk_review', async (ctx) => {
+  if (!ctx.session.bulkTransfer) {
+    await ctx.answerCbQuery('No bulk transfer in progress.');
+    return;
+  }
+  
   const { recipients } = ctx.session.bulkTransfer;
   
   if (recipients.length === 0) {
@@ -159,6 +178,10 @@ bulkTransferCommand.action('bulk_review', async (ctx) => {
   }
   
   try {
+    if (!ctx.chat) {
+      throw new Error('Chat context is not available');
+    }
+    
     // Calculate fees
     const feeInfo = await walletService.getBulkTransactionFeeInfo(recipients, ctx.chat.id);
     
@@ -166,7 +189,7 @@ bulkTransferCommand.action('bulk_review', async (ctx) => {
     ctx.session.bulkTransfer.feeInfo = feeInfo;
     
     // Create a formatted list of recipients
-    const recipientsList = recipients.map((r, i) => 
+    const recipientsList = recipients.map((r: BulkRecipient, i: number) => 
       `${i + 1}. ${r.email}: ${formatter.formatCurrency(parseFloat(r.amount))} USDC`
     ).join('\n');
     
@@ -206,6 +229,11 @@ bulkTransferCommand.action('bulk_review', async (ctx) => {
  * Handle the confirmation action to execute the bulk transfer
  */
 bulkTransferCommand.action('bulk_confirm', async (ctx) => {
+  if (!ctx.session.bulkTransfer) {
+    await ctx.answerCbQuery('No bulk transfer in progress.');
+    return;
+  }
+  
   const { recipients } = ctx.session.bulkTransfer;
   
   try {
@@ -216,8 +244,16 @@ bulkTransferCommand.action('bulk_confirm', async (ctx) => {
       { parse_mode: 'Markdown' }
     );
     
+    if (!ctx.chat) {
+      throw new Error('Chat context is not available');
+    }
+    
     // Execute the bulk transfer
     const result = await walletService.sendBulkTransfers(ctx.chat.id, recipients);
+    
+    if (!ctx.session.bulkTransfer.feeInfo) {
+      throw new Error('Fee information is missing');
+    }
     
     // Success message
     await ctx.editMessageText(
