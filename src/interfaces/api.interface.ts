@@ -64,4 +64,16 @@ export interface TransfersListResponse {
   total: number;
   page: number;
   limit: number;
+}
+
+export interface BankAccountResponse {
+  id: string;
+  bankName: string;
+  accountNumberMasked: string; // Last 4 digits with asterisks, e.g., ****1234
+  accountType: string; // e.g., "checking", "savings"
+  currency: string;
+  isVerified: boolean;
+  isDefault: boolean;
+  created_at: string;
+  updated_at: string;
 } 
