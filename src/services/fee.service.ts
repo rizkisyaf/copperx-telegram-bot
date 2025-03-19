@@ -96,6 +96,11 @@ class FeeService {
     try {
       if (chatId && authService.isAuthenticated(chatId)) {
         const session = authService.getSession(chatId)!;
+        
+        if (!session.token) {
+          throw new Error('Invalid session token');
+        }
+        
         apiService.setToken(session.token);
         
         // Call the API endpoint to calculate the fee
