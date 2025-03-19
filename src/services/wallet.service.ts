@@ -3,7 +3,10 @@ import authService from './auth.service';
 import feeService from './fee.service';
 import { ApiResponse } from '../interfaces/api.interface';
 import { WalletBalanceResponse, WalletResponse, TransferResponse, TransfersListResponse, BankAccountResponse } from '../interfaces/api.interface';
-import { TransferRequest } from '../interfaces/wallet.interface';
+import { TransferRequest, BulkTransferRequest, BulkRecipient } from '../interfaces/wallet.interface';
+
+// Supported networks (should be fetched from API in production)
+const SUPPORTED_NETWORKS = ['SOLANA', 'ETHEREUM'];
 
 class WalletService {
   // Calculate fee for a transaction
@@ -15,6 +18,73 @@ class WalletService {
   // Check if amount meets minimum requirements
   public async validateMinimumAmount(amount: string, transferType: 'email' | 'wallet' | 'bank', network?: string): Promise<{ valid: boolean, minimumAmount?: number }> {
     return feeService.validateMinimumAmount(amount, transferType, network);
+  }
+
+  // Get supported networks from the API
+  public async getSupportedNetworks(chatId: number): Promise<string[]> {
+    try {
+      if (!authService.isAuthenticated(chatId)) {
+        throw new Error('User not authenticated');
+      }
+      
+      const session = authService.getSession(chatId)!;
+      apiService.setToken(session.token);
+      
+      const response = await apiService.get<ApiResponse<string[]>>('/api/networks');
+      
+      if (response.data && Array.isArray(response.data)) {
+        return response.data;
+      }
+      
+      return SUPPORTED_NETWORKS; // Fallback to hardcoded networks
+    } catch (error: any) {
+      console.error('Error getting supported networks:', error);
+      return SUPPORTED_NETWORKS; // Fallback to hardcoded networks
+    }
+  }
+  
+  // Validate network
+  public async validateNetwork(network: string, chatId?: number): Promise<boolean> {
+    const networkUpperCase = network.toUpperCase();
+    
+    if (chatId) {
+      const supportedNetworks = await this.getSupportedNetworks(chatId);
+      return supportedNetworks.includes(networkUpperCase);
+    }
+    
+    return SUPPORTED_NETWORKS.includes(networkUpperCase);
+  }
+
+  // Calculate fee for bulk transfers
+  public async calculateBulkFee(totalAmount: string, recipientCount: number, chatId?: number): Promise<number> {
+    try {
+      if (chatId && authService.isAuthenticated(chatId)) {
+        const session = authService.getSession(chatId)!;
+        apiService.setToken(session.token);
+        
+        const response = await apiService.post<ApiResponse<{fee: number}>>('/api/calculate-bulk-fee', {
+          amount: totalAmount,
+          recipientCount
+        });
+        
+        if (response.data && typeof response.data.fee === 'number') {
+          return response.data.fee;
+        }
+      }
+      
+      // Fallback calculation if API call fails
+      return recipientCount * (await feeService.calculateFee(
+        (parseFloat(totalAmount) / recipientCount).toString(), 
+        'email',
+        undefined,
+        chatId
+      )).fee;
+    } catch (error) {
+      console.error('Error calculating bulk fee:', error);
+      // Simple fallback - apply email transfer fee per recipient
+      const perRecipientFee = (await feeService.getFeeStructure()).EMAIL_TRANSFER;
+      return recipientCount * perRecipientFee;
+    }
   }
 
   // Get wallet balances
@@ -107,7 +177,7 @@ class WalletService {
   }
 
   // Get transaction history
-  public async getTransferHistory(chatId: number, page: number = 1, limit: number = 10): Promise<TransfersListResponse | null> {
+  public async getTransferHistory(chatId: number, page: number = 1, limit: number = 10, type?: string, status?: string): Promise<TransfersListResponse | null> {
     try {
       if (!authService.isAuthenticated(chatId)) {
         throw new Error('User not authenticated');
@@ -116,7 +186,11 @@ class WalletService {
       const session = authService.getSession(chatId)!;
       apiService.setToken(session.token);
       
-      const response = await apiService.get<ApiResponse<TransfersListResponse>>(`/api/transfers?page=${page}&limit=${limit}`);
+      let url = `/api/transfers?page=${page}&limit=${limit}`;
+      if (type) url += `&type=${type}`;
+      if (status) url += `&status=${status}`;
+      
+      const response = await apiService.get<ApiResponse<TransfersListResponse>>(url);
       
       if (!response.data) {
         throw new Error('Failed to get transfer history');
@@ -174,6 +248,83 @@ class WalletService {
     }
   }
 
+  // Send funds to multiple email addresses (bulk transfer)
+  public async sendBulkTransfers(
+    chatId: number, 
+    recipients: BulkRecipient[]
+  ): Promise<TransferResponse[] | null> {
+    try {
+      if (!authService.isAuthenticated(chatId)) {
+        throw new Error('User not authenticated');
+      }
+      
+      if (recipients.length === 0) {
+        throw new Error('No recipients specified for bulk transfer');
+      }
+      
+      // Validate each transfer and calculate total amount
+      let totalAmount = 0;
+      const validationErrors: string[] = [];
+      
+      for (const recipient of recipients) {
+        // Validate email format
+        if (!recipient.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient.email)) {
+          validationErrors.push(`Invalid email format for recipient: ${recipient.email}`);
+          continue;
+        }
+        
+        // Validate amount is a number
+        const amount = parseFloat(recipient.amount);
+        if (isNaN(amount) || amount <= 0) {
+          validationErrors.push(`Invalid amount for ${recipient.email}: ${recipient.amount}`);
+          continue;
+        }
+        
+        // Validate minimum amount
+        const validation = await this.validateMinimumAmount(recipient.amount, 'email');
+        if (!validation.valid) {
+          validationErrors.push(`Amount too small for ${recipient.email}. Minimum amount is ${validation.minimumAmount} USDC.`);
+          continue;
+        }
+        
+        totalAmount += amount;
+      }
+      
+      if (validationErrors.length > 0) {
+        throw new Error(`Validation errors in bulk transfer:\n${validationErrors.join('\n')}`);
+      }
+      
+      // Calculate bulk fee
+      const bulkFee = await this.calculateBulkFee(totalAmount.toString(), recipients.length, chatId);
+      const totalWithFee = totalAmount + bulkFee;
+      
+      // Check if user has sufficient balance
+      const balanceCheck = await this.checkBalance(chatId, totalWithFee.toString(), true);
+      if (!balanceCheck.sufficient) {
+        throw new Error(`Insufficient balance. Available: ${balanceCheck.availableBalance || '0'} USDC. Required: ${totalWithFee.toFixed(2)} USDC (includes ${bulkFee.toFixed(2)} USDC bulk fee).`);
+      }
+      
+      const session = authService.getSession(chatId)!;
+      apiService.setToken(session.token);
+      
+      const bulkTransferRequest: BulkTransferRequest = {
+        recipients,
+        includeFee: true
+      };
+      
+      const response = await apiService.post<ApiResponse<TransferResponse[]>>('/api/transfers/send-batch', bulkTransferRequest);
+      
+      if (!response.data) {
+        throw new Error('Failed to send bulk transfers');
+      }
+      
+      return response.data;
+    } catch (error: any) {
+      console.error('Error sending bulk transfers:', error);
+      throw error;
+    }
+  }
+
   // Send funds to external wallet
   public async sendFundsToWallet(chatId: number, address: string, network: string, amount: string): Promise<TransferResponse | null> {
     try {
@@ -183,8 +334,9 @@ class WalletService {
       
       // Validate network
       const normalizedNetwork = network.toUpperCase();
-      if (!['SOLANA', 'ETHEREUM'].includes(normalizedNetwork)) {
-        throw new Error('Unsupported network. Please choose Solana or Ethereum.');
+      const isValidNetwork = await this.validateNetwork(normalizedNetwork, chatId);
+      if (!isValidNetwork) {
+        throw new Error(`Unsupported network: ${network}. Please choose a supported network.`);
       }
       
       // Validate address format based on network
@@ -301,6 +453,31 @@ class WalletService {
     };
   }
 
+  // Get bulk transfer fee information
+  public async getBulkTransactionFeeInfo(
+    recipients: BulkRecipient[], 
+    chatId?: number
+  ): Promise<{
+    totalAmount: number,
+    fee: number,
+    totalWithFee: number,
+    recipientCount: number,
+    feePerRecipient: number,
+    feePercentage: string
+  }> {
+    const totalAmount = recipients.reduce((sum, recipient) => sum + parseFloat(recipient.amount), 0);
+    const fee = await this.calculateBulkFee(totalAmount.toString(), recipients.length, chatId);
+    
+    return {
+      totalAmount,
+      fee, 
+      totalWithFee: totalAmount + fee,
+      recipientCount: recipients.length,
+      feePerRecipient: fee / recipients.length,
+      feePercentage: ((fee / totalAmount) * 100).toFixed(2)
+    };
+  }
+
   // Get linked bank accounts
   public async getBankAccounts(chatId: number): Promise<BankAccountResponse[] | null> {
     try {
@@ -321,6 +498,99 @@ class WalletService {
     } catch (error: any) {
       console.error('Error getting bank accounts:', error);
       return null;
+    }
+  }
+  
+  // Create a payment link
+  public async createPaymentLink(
+    chatId: number,
+    amount: string,
+    description: string,
+    expiresIn?: number // in hours
+  ): Promise<{link: string; id: string} | null> {
+    try {
+      if (!authService.isAuthenticated(chatId)) {
+        throw new Error('User not authenticated');
+      }
+      
+      const session = authService.getSession(chatId)!;
+      apiService.setToken(session.token);
+      
+      const payload = {
+        amount,
+        description,
+        expiresIn: expiresIn || 24 // default 24 hours
+      };
+      
+      const response = await apiService.post<ApiResponse<{link: string; id: string}>>('/api/payment-links', payload);
+      
+      if (!response.data) {
+        throw new Error('Failed to create payment link');
+      }
+      
+      return response.data;
+    } catch (error: any) {
+      console.error('Error creating payment link:', error);
+      return null;
+    }
+  }
+
+  // Get saved addresses (address book)
+  public async getSavedAddresses(chatId: number): Promise<any[] | null> {
+    try {
+      if (!authService.isAuthenticated(chatId)) {
+        throw new Error('User not authenticated');
+      }
+      
+      const session = authService.getSession(chatId)!;
+      apiService.setToken(session.token);
+      
+      const response = await apiService.get<ApiResponse<any[]>>('/api/address-book');
+      
+      if (!response.data) {
+        throw new Error('Failed to get saved addresses');
+      }
+      
+      return response.data;
+    } catch (error: any) {
+      console.error('Error getting saved addresses:', error);
+      return null;
+    }
+  }
+
+  // Save address to address book
+  public async saveAddress(
+    chatId: number,
+    label: string,
+    network: string,
+    address: string
+  ): Promise<boolean> {
+    try {
+      if (!authService.isAuthenticated(chatId)) {
+        throw new Error('User not authenticated');
+      }
+      
+      // Validate network
+      const isValidNetwork = await this.validateNetwork(network, chatId);
+      if (!isValidNetwork) {
+        throw new Error(`Unsupported network: ${network}`);
+      }
+      
+      const session = authService.getSession(chatId)!;
+      apiService.setToken(session.token);
+      
+      const payload = {
+        label,
+        network,
+        address
+      };
+      
+      await apiService.post<ApiResponse<any>>('/api/address-book', payload);
+      
+      return true;
+    } catch (error: any) {
+      console.error('Error saving address:', error);
+      return false;
     }
   }
 }
